@@ -21,10 +21,10 @@ import (
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/lightningnetwork/lnd/pconn"
 	"github.com/lightningnetwork/lnd/routing"
 	"github.com/roasbeef/btcd/btcec"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
-	"github.com/roasbeef/btcd/connmgr"
 	"github.com/roasbeef/btcd/txscript"
 	"github.com/roasbeef/btcd/wire"
 )
@@ -92,7 +92,7 @@ type peer struct {
 	started    int32
 	disconnect int32
 
-	connReq *connmgr.ConnReq
+	connReq *pconn.Req
 	conn    net.Conn
 
 	addr        *lnwire.NetAddress
@@ -158,7 +158,7 @@ type peer struct {
 
 // newPeer creates a new peer from an establish connection object, and a
 // pointer to the main server.
-func newPeer(conn net.Conn, connReq *connmgr.ConnReq, server *server,
+func newPeer(conn net.Conn, connReq *pconn.Req, server *server,
 	addr *lnwire.NetAddress, inbound bool,
 	localFeatures *lnwire.RawFeatureVector) (*peer, error) {
 
