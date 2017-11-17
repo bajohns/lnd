@@ -19,10 +19,10 @@ import (
 	"github.com/lightningnetwork/lnd/discovery"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnwire"
+	"github.com/lightningnetwork/lnd/pconn"
 	"github.com/lightningnetwork/lnd/routing"
 	"github.com/roasbeef/btcd/btcec"
 	"github.com/roasbeef/btcd/chaincfg/chainhash"
-	"github.com/roasbeef/btcd/connmgr"
 	"github.com/roasbeef/btcd/wire"
 	"github.com/roasbeef/btcutil"
 
@@ -70,7 +70,7 @@ type server struct {
 	peerConnectedListeners map[string][]chan<- struct{}
 
 	persistentPeers    map[string]struct{}
-	persistentConnReqs map[string][]*connmgr.ConnReq
+	persistentConnReqs map[string][]*pconn.Req
 
 	// ignorePeerTermination tracks peers for which the server has initiated
 	// a disconnect. Adding a peer to this map causes the peer termination
@@ -96,7 +96,7 @@ type server struct {
 
 	sphinx *htlcswitch.OnionProcessor
 
-	connMgr *connmgr.ConnManager
+	connMgr *pconn.Manager
 
 	// globalFeatures feature vector which affects HTLCs and thus are also
 	// advertised to other nodes.
@@ -146,7 +146,7 @@ func newServer(listenAddrs []string, chanDB *channeldb.DB, cc *chainControl,
 		lightningID: sha256.Sum256(serializedPubKey),
 
 		persistentPeers:       make(map[string]struct{}),
-		persistentConnReqs:    make(map[string][]*connmgr.ConnReq),
+		persistentConnReqs:    make(map[string][]*pconn.Req),
 		ignorePeerTermination: make(map[*peer]struct{}),
 
 		peersByID:              make(map[int32]*peer),
@@ -349,14 +349,12 @@ func newServer(listenAddrs []string, chanDB *channeldb.DB, cc *chainControl,
 	// Create the connection manager which will be responsible for
 	// maintaining persistent outbound connections and also accepting new
 	// incoming connections
-	cmgr, err := connmgr.New(&connmgr.Config{
-		Listeners:      listeners,
-		OnAccept:       s.InboundPeerConnected,
-		RetryDuration:  time.Second * 5,
-		TargetOutbound: 100,
-		GetNewAddress:  nil,
-		Dial:           noiseDial(s.identityPriv),
-		OnConnection:   s.OutboundPeerConnected,
+	cmgr, err := pconn.NewManager(&pconn.Config{
+		Listeners:     listeners,
+		OnAccept:      s.InboundPeerConnected,
+		RetryDuration: time.Second * 5,
+		Dial:          noiseDial(s.identityPriv),
+		OnConnection:  s.OutboundPeerConnected,
 	})
 	if err != nil {
 		return nil, err
@@ -413,9 +411,8 @@ func (s *server) Start() error {
 		return err
 	}
 
-	go s.connMgr.Start()
+	s.connMgr.Start()
 
-	// If network bootstrapping hasn't been disabled, then we'll configure
 	// the set of active bootstrappers, and launch a dedicated goroutine to
 	// maintain a set of persistent connections.
 	if !cfg.NoNetBootstrap && !(cfg.Bitcoin.SimNet || cfg.Litecoin.SimNet) {
@@ -815,9 +812,8 @@ func (s *server) establishPersistentConnections() error {
 			// Send the persistent connection request to the
 			// connection manager, saving the request itself so we
 			// can cancel/restart the process as needed.
-			connReq := &connmgr.ConnReq{
-				Addr:      lnAddr,
-				Permanent: true,
+			connReq := &pconn.Req{
+				Addr: lnAddr,
 			}
 
 			s.persistentConnReqs[pubStr] = append(
@@ -1070,21 +1066,20 @@ func (s *server) peerTerminationWatcher(p *peer) {
 	pubStr := string(p.addr.IdentityKey.SerializeCompressed())
 	_, ok := s.persistentPeers[pubStr]
 	if ok {
+		// We'll only need to re-launch a connection requests if one
+		// isn't already currently pending.
+		if _, ok := s.persistentConnReqs[pubStr]; ok {
+			return
+		}
+
 		srvrLog.Debugf("Attempting to re-establish persistent "+
 			"connection to peer %v", p)
 
 		// If so, then we'll attempt to re-establish a persistent
 		// connection to the peer.
 		// TODO(roasbeef): look up latest info for peer in database
-		connReq := &connmgr.ConnReq{
-			Addr:      p.addr,
-			Permanent: true,
-		}
-
-		// We'll only need to re-launch a connection requests if one
-		// isn't already currently pending.
-		if _, ok := s.persistentConnReqs[pubStr]; ok {
-			return
+		connReq := &pconn.Req{
+			Addr: p.addr,
 		}
 
 		// Otherwise, we'll launch a new connection requests in order
@@ -1093,7 +1088,9 @@ func (s *server) peerTerminationWatcher(p *peer) {
 		s.persistentConnReqs[pubStr] = append(
 			s.persistentConnReqs[pubStr], connReq)
 
-		go s.connMgr.Connect(connReq)
+		// Ignore returned error, only happens if the connection manager
+		// is already shutting down.
+		s.connMgr.Connect(connReq)
 	}
 }
 
@@ -1111,7 +1108,7 @@ func (s *server) shouldRequestGraphSync() bool {
 // peerConnected is a function that handles initialization a newly connected
 // peer by adding it to the server's global list of all active peers, and
 // starting all the goroutines the peer needs to function properly.
-func (s *server) peerConnected(conn net.Conn, connReq *connmgr.ConnReq,
+func (s *server) peerConnected(conn net.Conn, connReq *pconn.Req,
 	inbound bool) {
 
 	brontideConn := conn.(*brontide.Conn)
@@ -1249,7 +1246,7 @@ func (s *server) InboundPeerConnected(conn net.Conn) {
 // OutboundPeerConnected initializes a new peer in response to a new outbound
 // connection.
 // NOTE: This function is safe for concurrent access.
-func (s *server) OutboundPeerConnected(connReq *connmgr.ConnReq, conn net.Conn) {
+func (s *server) OutboundPeerConnected(connReq *pconn.Req, conn net.Conn) {
 	// Exit early if we have already been instructed to shutdown, this
 	// prevents any delayed callbacks from accidentally registering peers.
 	if s.Stopped() {
@@ -1478,9 +1475,8 @@ func (s *server) ConnectToPeer(addr *lnwire.NetAddress, perm bool) error {
 	// persistent connection to the peer.
 	srvrLog.Debugf("Connecting to %v", addr)
 	if perm {
-		connReq := &connmgr.ConnReq{
-			Addr:      addr,
-			Permanent: true,
+		connReq := &pconn.Req{
+			Addr: addr,
 		}
 
 		s.persistentPeers[targetPub] = struct{}{}
@@ -1488,9 +1484,7 @@ func (s *server) ConnectToPeer(addr *lnwire.NetAddress, perm bool) error {
 			s.persistentConnReqs[targetPub], connReq)
 		s.mu.Unlock()
 
-		go s.connMgr.Connect(connReq)
-
-		return nil
+		return s.connMgr.Connect(connReq)
 	}
 	s.mu.Unlock()
 
