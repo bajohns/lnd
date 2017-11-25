@@ -416,6 +416,26 @@ func lndMain() error {
 		}
 	}
 
+	// Move to module
+	//metricsTicker := time.NewTicker(time.Second*5)
+	//defer metricsTicker.Stop()
+	//
+	//metricsStop := make(chan struct{})
+	//
+	//peers := server.Peers()
+	//
+	//
+	//go func () {
+	//	for {
+	//		select {
+	//		case <-metricsTicker.C:
+	//
+	//		case <-metricsStop:
+	//			return
+	//		}
+	//	}
+	//}
+
 	addInterruptHandler(func() {
 		ltndLog.Infof("Gracefully shutting down the server...")
 		rpcServer.Stop()

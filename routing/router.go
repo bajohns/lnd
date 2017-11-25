@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"os"
 	"bytes"
 	"fmt"
 	"sort"
@@ -20,9 +21,12 @@ import (
 	"github.com/roasbeef/btcutil"
 
 	"crypto/sha256"
+	"encoding/hex"
 
 	"github.com/go-errors/errors"
 	"github.com/lightningnetwork/lightning-onion"
+	"github.com/rs/zerolog"
+	"strings"
 )
 
 const (
@@ -128,6 +132,8 @@ type Config struct {
 	// GraphPruneInterval is used as an interval to determine how often we
 	// should examine the channel graph to garbage collect zombie channels.
 	GraphPruneInterval time.Duration
+
+	LogDir string
 }
 
 // routeTuple is an entry within the ChannelRouter's route cache. We cache
@@ -240,6 +246,11 @@ func New(cfg Config) (*ChannelRouter, error) {
 		return nil, err
 	}
 
+	eventJson := createEventLog(cfg.LogDir)
+	eventJson.Error().Msg("init router")
+
+	UseJsonLogger(eventJson)
+
 	return &ChannelRouter{
 		cfg:               &cfg,
 		networkUpdates:    make(chan *routingMsg),
@@ -250,6 +261,17 @@ func New(cfg Config) (*ChannelRouter, error) {
 		routeCache:        make(map[routeTuple][]*Route),
 		quit:              make(chan struct{}),
 	}, nil
+}
+
+func createEventLog(logDir string) zerolog.Logger {
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+
+	f, err := os.OpenFile(logDir+"/events.json", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		println("error opening file: %v", err)
+	}
+
+	return zerolog.New(f).With().Timestamp().Str("src", "lnd").Logger()
 }
 
 // Start launches all the goroutines the ChannelRouter requires to carry out
@@ -385,8 +407,8 @@ func (r *ChannelRouter) syncGraphWithChain() error {
 	case pruneHeight == 0 || pruneHash == nil:
 		return nil
 
-	// If the block hashes and heights match exactly, then we don't need to
-	// prune the channel graph as we're already fully in sync.
+		// If the block hashes and heights match exactly, then we don't need to
+		// prune the channel graph as we're already fully in sync.
 	case bestHash.IsEqual(pruneHash) && uint32(bestHeight) == pruneHeight:
 		return nil
 	}
@@ -475,6 +497,25 @@ func (r *ChannelRouter) syncGraphWithChain() error {
 		log.Infof("Block %v (height=%v) closed %v channels",
 			nextHash, nextHeight, numClosed)
 
+		for _, closed := range closedChans {
+			required := eventLog.Info().
+				Str("eventType", "ChannelClosed").
+				Uint64("channelId", closed.ChannelID).
+				Str("node1Key", hex.EncodeToString(closed.NodeKey1.SerializeCompressed())).
+				Str("node2Key", hex.EncodeToString(closed.NodeKey2.SerializeCompressed())).
+				Str("chainHash", closed.ChainHash.String()).
+				Str("channelPoint", closed.ChannelPoint.String()).
+				Float64("capacity", closed.Capacity.ToUnit(btcutil.AmountMilliBTC))
+
+			if ! closed.AuthProof.IsEmpty() {
+				required = required.
+					Str("node1AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig1.Serialize())).
+					Str("node1AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig1.Serialize())).
+					Str("node2AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig2.Serialize())).
+					Str("node2AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig2.Serialize()))
+			}
+			required.Msg("Channel closed")
+		}
 		numChansClosed += numClosed
 	}
 
@@ -558,8 +599,8 @@ func (r *ChannelRouter) networkHandler() {
 
 			// TODO(halseth): notify client about the reorg?
 
-		// A new block has arrived, so we can prune the channel graph
-		// of any channels which were closed in the block.
+			// A new block has arrived, so we can prune the channel graph
+			// of any channels which were closed in the block.
 		case chainUpdate, ok := <-r.newBlocks:
 			// If the channel has been closed, then this indicates
 			// the daemon is shutting down, so we exit ourselves.
@@ -600,6 +641,58 @@ func (r *ChannelRouter) networkHandler() {
 			log.Infof("Block %v (height=%v) closed %v channels",
 				chainUpdate.Hash, blockHeight, len(chansClosed))
 
+			for _, closed := range chansClosed {
+				required := eventLog.Info().
+					Str("eventType", "ChannelClosed").
+					Uint64("channelId", closed.ChannelID).
+					Str("node1Key", hex.EncodeToString(closed.NodeKey1.SerializeCompressed())).
+					Str("node2Key", hex.EncodeToString(closed.NodeKey2.SerializeCompressed())).
+					Str("chainHash", closed.ChainHash.String()).
+					Str("channelPoint", closed.ChannelPoint.String()).
+					Float64("capacity", closed.Capacity.ToUnit(btcutil.AmountMilliBTC))
+
+				if ! closed.AuthProof.IsEmpty() {
+					required = required.
+						Str("node1AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig1.Serialize())).
+						Str("node1AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig1.Serialize())).
+						Str("node2AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig2.Serialize())).
+						Str("node2AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig2.Serialize()))
+				}
+				required.Msg("Channel closed")
+			}
+
+			eventLog.Info().Str("blockHash", chainUpdate.Hash.String()).
+				Str("eventType", "NewBlock").
+				Uint32("blockHeight", blockHeight).
+				Int("channelsClosed", len(chansClosed)).
+				Int("transactionCount", len(chainUpdate.Transactions)).
+				Msg("New block stats")
+
+			for index, trans := range chainUpdate.Transactions {
+				required := eventLog.Info().
+					Str("eventType", "NewUTXO").
+					Uint32(fmt.Sprintf("tran%dlockTime", index), trans.LockTime).
+					Int32(fmt.Sprintf("tran%dversion", index), trans.Version).
+					Int(fmt.Sprintf("tran%dtxInCount", index), len(trans.TxIn)).
+					Int(fmt.Sprintf("tran%dtxOutCount", index), len(trans.TxOut)).
+					Str(fmt.Sprintf("tran%dwitness", index), trans.WitnessHash().String())
+
+				for indx, in := range trans.TxIn {
+					// TODO need prev values
+					required.
+						Uint32(fmt.Sprintf("tran%dtxIn%dSeq", index, indx), in.Sequence).
+						Int(fmt.Sprintf("tran%dtxIn%dSize", index, indx), in.SerializeSize()).
+						Str(fmt.Sprintf("tran%dtxIn%dOutPoint", index, indx), in.PreviousOutPoint.String())
+				}
+				for indx, out := range trans.TxOut {
+					required.
+						Int64(fmt.Sprintf("tran%dtxOut%dValue", index, indx), out.Value).
+						Int(fmt.Sprintf("tran%dtxOut%dSize", index, indx), out.SerializeSize())
+				}
+
+				required.Msg("New subscribed UTXO found")
+			}
+
 			// Invalidate the route cache as the block height has
 			// changed which will invalidate the HTLC timeouts we
 			// have crafted within each of the pre-computed routes.
@@ -623,9 +716,9 @@ func (r *ChannelRouter) networkHandler() {
 				ClosedChannels: closeSummaries,
 			})
 
-		// A new notification client update has arrived. We're either
-		// gaining a new client, or cancelling notifications for an
-		// existing client.
+			// A new notification client update has arrived. We're either
+			// gaining a new client, or cancelling notifications for an
+			// existing client.
 		case ntfnUpdate := <-r.ntfnClientUpdates:
 			clientID := ntfnUpdate.clientID
 
@@ -647,9 +740,9 @@ func (r *ChannelRouter) networkHandler() {
 				exit:     make(chan struct{}),
 			}
 
-		// The graph prune ticker has ticked, so we'll examine the
-		// state of the known graph to filter out any zombie channels
-		// for pruning.
+			// The graph prune ticker has ticked, so we'll examine the
+			// state of the known graph to filter out any zombie channels
+			// for pruning.
 		case <-graphPruneTicker.C:
 
 			var chansToPrune []wire.OutPoint
@@ -726,8 +819,8 @@ func (r *ChannelRouter) networkHandler() {
 				}
 			}
 
-		// The router has been signalled to exit, to we exit our main
-		// loop so the wait group can be decremented.
+			// The router has been signalled to exit, to we exit our main
+			// loop so the wait group can be decremented.
 		case <-r.quit:
 			return
 		}
@@ -778,6 +871,24 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 
 		log.Infof("Updated vertex data for node=%x",
 			msg.PubKey.SerializeCompressed())
+
+		required := eventLog.Info().
+			Str("eventType", "NodeUpdate").
+			Str("node", hex.EncodeToString(msg.PubKey.SerializeCompressed())).
+			Int("nodeAddressCount", len(msg.Addresses)).
+			Str("nodeAlias", msg.Alias).
+			Str("lastUpdate", msg.LastUpdate.Format(time.RFC3339))
+
+		for index, addr := range msg.Addresses {
+			split:=strings.Split(addr.String(), ":")
+			addr := split[0]
+			port := split[1]
+			required.
+				Str(fmt.Sprintf("nodeAddress%dIp", index), addr).
+				Str(fmt.Sprintf("nodeAddress%dPort", index), port)
+		}
+
+		required.Msg("Node update")
 
 	case *channeldb.ChannelEdgeInfo:
 		// Prior to processing the announcement we first check if we
@@ -881,6 +992,15 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 			msg.NodeKey2.SerializeCompressed(),
 			fundingPoint, msg.ChannelID, msg.Capacity)
 
+		eventLog.Info().
+			Str("eventType", "NewChannel").
+			Str("node1Key", hex.EncodeToString(msg.NodeKey1.SerializeCompressed())).
+			Str("node2Key", hex.EncodeToString(msg.NodeKey2.SerializeCompressed())).
+			Str("fundingPoint", fundingPoint.String()).
+			Uint64("channelId", msg.ChannelID).
+			Float64("capacity", msg.Capacity.ToUnit(btcutil.AmountMilliBTC)).
+			Msg("New channel discovered")
+
 		// As a new edge has been added to the channel graph, we'll
 		// update the current UTXO filter within our active
 		// FilteredChainView so we are notified if/when this channel is
@@ -920,8 +1040,8 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 
 			}
 
-		// Similarly, a flag set of 1 indicates this is an announcement
-		// for the "second" node in the channel.
+			// Similarly, a flag set of 1 indicates this is an announcement
+			// for the "second" node in the channel.
 		case 1:
 			if edge2Timestamp.After(msg.LastUpdate) ||
 				edge2Timestamp.Equal(msg.LastUpdate) {
@@ -963,6 +1083,22 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 		invalidateCache = true
 		log.Infof("New channel update applied: %v",
 			spew.Sdump(msg))
+
+		required := eventLog.Info().
+			Str("eventType", "ChannelUpdate").
+			Uint64("channelId", msg.ChannelID).
+			Uint16("flags", msg.Flags).
+			Str("lastUpdate", msg.LastUpdate.Format(time.RFC3339)).
+			Float64("feeBaseMSat", msg.FeeBaseMSat.ToSatoshis().ToUnit(btcutil.AmountMilliBTC)).
+			Uint16("timeLockDelta", msg.TimeLockDelta).
+			Float64("minHTLC", msg.MinHTLC.ToSatoshis().ToUnit(btcutil.AmountMilliBTC)).
+			Str("signature", hex.EncodeToString(msg.Signature.Serialize()))
+
+		if msg.Node != nil {
+			required = required.Str("nodePubKey", hex.EncodeToString(msg.Node.PubKey.SerializeCompressed()))
+		}
+		required.Msg("Channel update")
+
 
 	default:
 		return errors.Errorf("wrong routing update message type")
@@ -1283,7 +1419,7 @@ type LightningPayment struct {
 	// FinalCLTVDelta is the CTLV expiry delta to use for the _final_ hop
 	// in the route. This means that the final hop will have a CLTV delta
 	// of at least: currentHeight + FinalCLTVDelta. If this value is
-	// unspcified, then a default value of DefaultFinalCLTVDelta will be
+	// unspecified, then a default value of DefaultFinalCLTVDelta will be
 	// used.
 	FinalCLTVDelta *uint16
 
@@ -1328,7 +1464,7 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte, *Route
 	// critical error during path finding.
 	for {
 		// We'll kick things off by requesting a new route from mission
-		// control, which will incoroporate the current best known
+		// control, which will incorporate the current best known
 		// state of the channel graph and our past HTLC routing
 		// successes/failures.
 		route, err := r.missionControl.RequestRoute(payment,
@@ -1397,38 +1533,38 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte, *Route
 			case *lnwire.FailUnknownPaymentHash:
 				return preImage, nil, sendError
 
-			// If we sent the wrong amount to the destination, then
-			// we'll exit early.
+				// If we sent the wrong amount to the destination, then
+				// we'll exit early.
 			case *lnwire.FailIncorrectPaymentAmount:
 				return preImage, nil, sendError
 
-			// If the time-lock that was extended to the final node
-			// was incorrect, then we can't proceed.
+				// If the time-lock that was extended to the final node
+				// was incorrect, then we can't proceed.
 			case *lnwire.FailFinalIncorrectCltvExpiry:
 				return preImage, nil, sendError
 
-			// If we crafted an invalid onion payload for the final
-			// node, then we'll exit early.
+				// If we crafted an invalid onion payload for the final
+				// node, then we'll exit early.
 			case *lnwire.FailFinalIncorrectHtlcAmount:
 				return preImage, nil, sendError
 
-			// Similarly, if the HTLC expiry that we extended to
-			// the final hop expires too soon, then will fail the
-			// payment.
-			//
-			// TODO(roasbeef): can happen to to race condition, try
-			// again with recent block height
+				// Similarly, if the HTLC expiry that we extended to
+				// the final hop expires too soon, then will fail the
+				// payment.
+				//
+				// TODO(roasbeef): can happen to to race condition, try
+				// again with recent block height
 			case *lnwire.FailFinalExpiryTooSoon:
 				return preImage, nil, sendError
 
-			// If we erroneously attempted to cross a chain border,
-			// then we'll cancel the payment.
+				// If we erroneously attempted to cross a chain border,
+				// then we'll cancel the payment.
 			case *lnwire.FailInvalidRealm:
 				return preImage, nil, sendError
 
-			// If we get a notice that the expiry was too soon for
-			// an intermediate node, then we'll exit early as the
-			// expected block height as shifted from underneath us.
+				// If we get a notice that the expiry was too soon for
+				// an intermediate node, then we'll exit early as the
+				// expected block height as shifted from underneath us.
 			case *lnwire.FailExpiryTooSoon:
 				update := onionErr.Update
 				if err := r.applyChannelUpdate(&update); err != nil {
@@ -1436,9 +1572,9 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte, *Route
 				}
 				return preImage, nil, sendError
 
-			// If we hit an instance of onion payload corruption or
-			// an invalid version, then we'll exit early as this
-			// shouldn't happen in the typical case.
+				// If we hit an instance of onion payload corruption or
+				// an invalid version, then we'll exit early as this
+				// shouldn't happen in the typical case.
 			case *lnwire.FailInvalidOnionVersion:
 				return preImage, nil, sendError
 			case *lnwire.FailInvalidOnionHmac:
@@ -1446,11 +1582,11 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte, *Route
 			case *lnwire.FailInvalidOnionKey:
 				return preImage, nil, sendError
 
-			// If the onion error includes a channel update, and
-			// isn't necessarily fatal, then we'll apply the update
-			// an continue with the rest of the routes.
-			//
-			// TODO(roasbeef): should re-query for routes with new updates
+				// If the onion error includes a channel update, and
+				// isn't necessarily fatal, then we'll apply the update
+				// an continue with the rest of the routes.
+				//
+				// TODO(roasbeef): should re-query for routes with new updates
 			case *lnwire.FailAmountBelowMinimum:
 				update := onionErr.Update
 				if err := r.applyChannelUpdate(&update); err != nil {
@@ -1488,7 +1624,7 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte, *Route
 				// As this error indicates that the target
 				// channel was unable to carry this HTLC (for
 				// w/e reason), we'll query the index to find
-				// the _outgoign_ channel the source of the
+				// the _outgoing_ channel the source of the
 				// error was meant to pass the HTLC along to.
 				badChan, ok := route.nextHopChannel(errSource)
 				if !ok {
@@ -1501,25 +1637,25 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte, *Route
 				r.missionControl.ReportChannelFailure(badChan)
 				continue
 
-			// If the send fail due to a node not having the
-			// required features, then we'll note this error and
-			// continue.
-			//
-			// TODO(roasbeef): remove node from path
+				// If the send fail due to a node not having the
+				// required features, then we'll note this error and
+				// continue.
+				//
+				// TODO(roasbeef): remove node from path
 			case *lnwire.FailRequiredNodeFeatureMissing:
 				continue
 
-			// If the send fail due to a node not having the
-			// required features, then we'll note this error and
-			// continue.
-			//
-			// TODO(roasbeef): remove channel from path
+				// If the send fail due to a node not having the
+				// required features, then we'll note this error and
+				// continue.
+				//
+				// TODO(roasbeef): remove channel from path
 			case *lnwire.FailRequiredChannelFeatureMissing:
 				continue
 
-			// If the next hop in the route wasn't known or
-			// offline, we'll prune the _next_ hop from the set of
-			// routes and retry.
+				// If the next hop in the route wasn't known or
+				// offline, we'll prune the _next_ hop from the set of
+				// routes and retry.
 			case *lnwire.FailUnknownNextPeer:
 				// This failure indicates that the node _after_
 				// the source of the error was not found. As a
@@ -1536,9 +1672,9 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte, *Route
 				r.missionControl.ReportVertexFailure(missingNode)
 				continue
 
-			// If the node wasn't able to forward for which ever
-			// reason, then we'll note this and continue with the
-			// routes.
+				// If the node wasn't able to forward for which ever
+				// reason, then we'll note this and continue with the
+				// routes.
 			case *lnwire.FailTemporaryNodeFailure:
 				missingNode, ok := route.nextHopVertex(errSource)
 				if !ok {
@@ -1548,9 +1684,9 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte, *Route
 				r.missionControl.ReportVertexFailure(missingNode)
 				continue
 
-			// If we get a permanent channel or node failure, then
-			// we'll note this (exclude the vertex/edge), and
-			// continue with the rest of the routes.
+				// If we get a permanent channel or node failure, then
+				// we'll note this (exclude the vertex/edge), and
+				// continue with the rest of the routes.
 			case *lnwire.FailPermanentChannelFailure:
 				// TODO(roasbeef): remove channel from path
 				continue
@@ -1692,7 +1828,7 @@ func (r *ChannelRouter) ForEachNode(cb func(*channeldb.LightningNode) error) err
 	})
 }
 
-// ForAllOutgoingChannels is used to iterate over all outgiong channel owned by
+// ForAllOutgoingChannels is used to iterate over all outgoing channel owned by
 // the router.
 //
 // NOTE: This method is part of the ChannelGraphSource interface.

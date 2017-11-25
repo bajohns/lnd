@@ -3,12 +3,14 @@ package routing
 import (
 	"github.com/btcsuite/btclog"
 	"github.com/lightningnetwork/lnd/routing/chainview"
+	"github.com/rs/zerolog"
 )
 
 // log is a logger that is initialized with no output filters.  This means the
 // package will not perform any logging by default until the caller requests
 // it.
 var log btclog.Logger
+var eventLog zerolog.Logger
 
 // The default amount of logging is none.
 func init() {
@@ -19,6 +21,7 @@ func init() {
 // by default until UseLogger is called.
 func DisableLog() {
 	log = btclog.Disabled
+	eventLog = zerolog.Nop()
 }
 
 // UseLogger uses a specified Logger to output package logging info.  This
@@ -27,6 +30,11 @@ func DisableLog() {
 func UseLogger(logger btclog.Logger) {
 	log = logger
 	chainview.UseLogger(logger)
+}
+
+func UseJsonLogger(logger zerolog.Logger) {
+	log.Info("Setting up json logging")
+	eventLog = logger
 }
 
 // logClosure is used to provide a closure over expensive logging operations so

@@ -135,6 +135,11 @@ imports:
   - wtxmgr
 - name: github.com/rogpeppe/fastuuid
   version: 6724a57986aff9bff1a1770e9347036def7c89f6
+- name: github.com/rs/zerolog
+  version: 9a65e7ccd2bad9082586a4de21f914648416c90f
+  subpackages:
+  - internal/json
+  - log
 - name: github.com/tv42/zbase32
   version: 501572607d0273fc75b3b261fa4904d63f6ffa0e
 - name: github.com/urfave/cli
