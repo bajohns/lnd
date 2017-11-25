@@ -17,8 +17,8 @@ import (
 	"github.com/lightningnetwork/lnd/discovery"
 	"github.com/lightningnetwork/lnd/htlcswitch"
 	"github.com/lightningnetwork/lnd/lnwallet"
+	"github.com/lightningnetwork/lnd/pconn"
 	"github.com/lightningnetwork/lnd/routing"
-	"github.com/roasbeef/btcd/connmgr"
 )
 
 // logWriter implements an io.Writer that outputs to both standard output and
@@ -79,7 +79,7 @@ func init() {
 	chainntnfs.UseLogger(ntfnLog)
 	channeldb.UseLogger(chdbLog)
 	htlcswitch.UseLogger(hswcLog)
-	connmgr.UseLogger(cmgrLog)
+	pconn.UseLogger(cmgrLog)
 	routing.UseLogger(crtrLog)
 	neutrino.UseLogger(btcnLog)
 	autopilot.UseLogger(atplLog)
