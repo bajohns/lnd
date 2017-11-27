@@ -608,6 +608,25 @@ func (r *ChannelRouter) syncGraphWithChain() error {
 		log.Infof("Block %v (height=%v) closed %v channels",
 			nextHash, nextHeight, numClosed)
 
+		for _, closed := range closedChans {
+			required := eventLog.Info().
+				Str("eventType", "ChannelClosed").
+				Uint64("channelId", closed.ChannelID).
+				Str("node1Key", hex.EncodeToString(closed.NodeKey1.SerializeCompressed())).
+				Str("node2Key", hex.EncodeToString(closed.NodeKey2.SerializeCompressed())).
+				Str("chainHash", closed.ChainHash.String()).
+				Str("channelPoint", closed.ChannelPoint.String()).
+				Float64("capacity", closed.Capacity.ToUnit(btcutil.AmountMilliBTC))
+
+			if ! closed.AuthProof.IsEmpty() {
+				required = required.
+					Str("node1AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig1.Serialize())).
+					Str("node1AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig1.Serialize())).
+					Str("node2AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig2.Serialize())).
+					Str("node2AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig2.Serialize()))
+			}
+			required.Msg("Channel closed")
+		}
 		numChansClosed += numClosed
 	}
 
@@ -769,6 +788,59 @@ func (r *ChannelRouter) networkHandler() {
 
 			log.Infof("Block %v (height=%v) closed %v channels",
 				chainUpdate.Hash, blockHeight, len(chansClosed))
+
+			for _, closed := range chansClosed {
+				required := eventLog.Info().
+					Str("eventType", "ChannelClosed").
+					Uint64("channelId", closed.ChannelID).
+					Str("node1Key", hex.EncodeToString(closed.NodeKey1.SerializeCompressed())).
+					Str("node2Key", hex.EncodeToString(closed.NodeKey2.SerializeCompressed())).
+					Str("chainHash", closed.ChainHash.String()).
+					Str("channelPoint", closed.ChannelPoint.String()).
+					Float64("capacity", closed.Capacity.ToUnit(btcutil.AmountMilliBTC))
+
+				if ! closed.AuthProof.IsEmpty() {
+					required = required.
+						Str("node1AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig1.Serialize())).
+						Str("node1AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig1.Serialize())).
+						Str("node2AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig2.Serialize())).
+						Str("node2AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig2.Serialize()))
+				}
+				required.Msg("Channel closed")
+			}
+
+
+			eventLog.Info().Str("blockHash", chainUpdate.Hash.String()).
+				Str("eventType", "NewBlock").
+				Uint32("blockHeight", blockHeight).
+				Int("channelsClosed", len(chansClosed)).
+				Int("transactionCount", len(chainUpdate.Transactions)).
+				Msg("New block stats")
+
+			for index, trans := range chainUpdate.Transactions {
+				required := eventLog.Info().
+					Str("eventType", "NewUTXO").
+					Uint32(fmt.Sprintf("tran%dlockTime", index), trans.LockTime).
+					Int32(fmt.Sprintf("tran%dversion", index), trans.Version).
+					Int(fmt.Sprintf("tran%dtxInCount", index), len(trans.TxIn)).
+					Int(fmt.Sprintf("tran%dtxOutCount", index), len(trans.TxOut)).
+					Str(fmt.Sprintf("tran%dwitness", index), trans.WitnessHash().String())
+
+				for indx, in := range trans.TxIn {
+					// TODO need prev values
+					required.
+						Uint32(fmt.Sprintf("tran%dtxIn%dSeq", index, indx), in.Sequence).
+						Int(fmt.Sprintf("tran%dtxIn%dSize", index, indx), in.SerializeSize()).
+						Str(fmt.Sprintf("tran%dtxIn%dOutPoint", index, indx), in.PreviousOutPoint.String())
+				}
+				for indx, out := range trans.TxOut {
+					required.
+						Int64(fmt.Sprintf("tran%dtxOut%dValue", index, indx), out.Value).
+						Int(fmt.Sprintf("tran%dtxOut%dSize", index, indx), out.SerializeSize())
+				}
+
+				required.Msg("New subscribed UTXO found")
+			}
 
 			// Invalidate the route cache as the block height has
 			// changed which will invalidate the HTLC timeouts we
@@ -956,6 +1028,24 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 		log.Infof("Updated vertex data for node=%x",
 			msg.PubKey.SerializeCompressed())
 
+		required := eventLog.Info().
+			Str("eventType", "NodeUpdate").
+			Str("node", hex.EncodeToString(msg.PubKey.SerializeCompressed())).
+			Int("nodeAddressCount", len(msg.Addresses)).
+			Str("nodeAlias", msg.Alias).
+			Str("lastUpdate", msg.LastUpdate.Format(time.RFC3339))
+
+		for index, addr := range msg.Addresses {
+			split:=strings.Split(addr.String(), ":")
+			addr := split[0]
+			port := split[1]
+			required.
+				Str(fmt.Sprintf("nodeAddress%dIp", index), addr).
+				Str(fmt.Sprintf("nodeAddress%dPort", index), port)
+		}
+
+		required.Msg("Node update")
+
 	case *channeldb.ChannelEdgeInfo:
 		// Prior to processing the announcement we first check if we
 		// already know of this channel, if so, then we can exit early.
@@ -1058,6 +1148,15 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 			msg.NodeKey2.SerializeCompressed(),
 			fundingPoint, msg.ChannelID, msg.Capacity)
 
+		eventLog.Info().
+			Str("eventType", "NewChannel").
+			Str("node1Key", hex.EncodeToString(msg.NodeKey1.SerializeCompressed())).
+			Str("node2Key", hex.EncodeToString(msg.NodeKey2.SerializeCompressed())).
+			Str("fundingPoint", fundingPoint.String()).
+			Uint64("channelId", msg.ChannelID).
+			Float64("capacity", msg.Capacity.ToUnit(btcutil.AmountMilliBTC)).
+			Msg("New channel discovered")
+
 		// As a new edge has been added to the channel graph, we'll
 		// update the current UTXO filter within our active
 		// FilteredChainView so we are notified if/when this channel is
@@ -1149,6 +1248,22 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 		invalidateCache = true
 		log.Infof("New channel update applied: %v",
 			spew.Sdump(msg))
+
+		required := eventLog.Info().
+			Str("eventType", "ChannelUpdate").
+			Uint64("channelId", msg.ChannelID).
+			Uint16("flags", msg.Flags).
+			Str("lastUpdate", msg.LastUpdate.Format(time.RFC3339)).
+			Float64("feeBaseMSat", msg.FeeBaseMSat.ToSatoshis().ToUnit(btcutil.AmountMilliBTC)).
+			Uint16("timeLockDelta", msg.TimeLockDelta).
+			Float64("minHTLC", msg.MinHTLC.ToSatoshis().ToUnit(btcutil.AmountMilliBTC)).
+			Str("signature", hex.EncodeToString(msg.Signature.Serialize()))
+
+		if msg.Node != nil {
+			required = required.Str("nodePubKey", hex.EncodeToString(msg.Node.PubKey.SerializeCompressed()))
+		}
+		required.Msg("Channel update")
+
 
 	default:
 		return errors.Errorf("wrong routing update message type")
