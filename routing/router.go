@@ -1662,7 +1662,7 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte, *Route
 				// As this error indicates that the target
 				// channel was unable to carry this HTLC (for
 				// w/e reason), we'll query the index to find
-				// the _outgoign_ channel the source of the
+				// the _outgoing_ channel the source of the
 				// error was meant to pass the HTLC along to.
 				badChan, ok := route.nextHopChannel(errSource)
 				if !ok {
