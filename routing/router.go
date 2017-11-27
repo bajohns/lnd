@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"os"
 	"bytes"
 	"fmt"
 	"sort"
@@ -20,9 +21,12 @@ import (
 	"github.com/roasbeef/btcutil"
 
 	"crypto/sha256"
+	"encoding/hex"
 
 	"github.com/go-errors/errors"
 	"github.com/lightningnetwork/lightning-onion"
+	"github.com/rs/zerolog"
+	"strings"
 )
 
 const (
@@ -128,6 +132,8 @@ type Config struct {
 	// GraphPruneInterval is used as an interval to determine how often we
 	// should examine the channel graph to garbage collect zombie channels.
 	GraphPruneInterval time.Duration
+
+	LogDir string
 }
 
 // routeTuple is an entry within the ChannelRouter's route cache. We cache
@@ -240,6 +246,11 @@ func New(cfg Config) (*ChannelRouter, error) {
 		return nil, err
 	}
 
+	eventJson := createEventLog(cfg.LogDir)
+	eventJson.Error().Msg("init router")
+
+	UseJsonLogger(eventJson)
+
 	return &ChannelRouter{
 		cfg:               &cfg,
 		networkUpdates:    make(chan *routingMsg),
@@ -250,6 +261,17 @@ func New(cfg Config) (*ChannelRouter, error) {
 		routeCache:        make(map[routeTuple][]*Route),
 		quit:              make(chan struct{}),
 	}, nil
+}
+
+func createEventLog(logDir string) zerolog.Logger {
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+
+	f, err := os.OpenFile(logDir+"/events.json", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		println("error opening file: %v", err)
+	}
+
+	return zerolog.New(f).With().Timestamp().Str("src", "lnd").Logger()
 }
 
 // Start launches all the goroutines the ChannelRouter requires to carry out
