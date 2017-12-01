@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"encoding/binary"
 
 	"github.com/boltdb/bolt"
 	"github.com/davecgh/go-spew/spew"
@@ -247,7 +248,7 @@ func New(cfg Config) (*ChannelRouter, error) {
 	}
 
 	eventJson := createEventLog(cfg.LogDir)
-	eventJson.Error().Msg("init router")
+	eventJson.Error().Msg("lnd startup")
 
 	UseJsonLogger(eventJson)
 
@@ -498,11 +499,22 @@ func (r *ChannelRouter) syncGraphWithChain() error {
 			nextHash, nextHeight, numClosed)
 
 		for _, closed := range closedChans {
+
+			bucketCount := uint64(20)
+			node1Alias16 := closed.NodeKey1.SerializeCompressed()[0:16]
+			node1Bucket := binary.BigEndian.Uint64(node1Alias16) % bucketCount
+
+			node2Alias16 := closed.NodeKey2.SerializeCompressed()[0:16]
+			node2Bucket := binary.BigEndian.Uint64(node2Alias16) % bucketCount
+
 			required := eventLog.Info().
 				Str("eventType", "ChannelClosed").
 				Uint64("channelId", closed.ChannelID).
+				Uint32("blockHeight", nextHeight).
 				Str("node1Key", hex.EncodeToString(closed.NodeKey1.SerializeCompressed())).
 				Str("node2Key", hex.EncodeToString(closed.NodeKey2.SerializeCompressed())).
+				Str(fmt.Sprintf("linkNode%d", node1Bucket), hex.EncodeToString(node1Alias16)).
+				Str(fmt.Sprintf("linkNode%d", node2Bucket), hex.EncodeToString(node2Alias16)).
 				Str("chainHash", closed.ChainHash.String()).
 				Str("channelPoint", closed.ChannelPoint.String()).
 				Float64("capacity", closed.Capacity.ToUnit(btcutil.AmountMilliBTC))
@@ -642,11 +654,21 @@ func (r *ChannelRouter) networkHandler() {
 				chainUpdate.Hash, blockHeight, len(chansClosed))
 
 			for _, closed := range chansClosed {
+				bucketCount := uint64(20)
+				node1Alias16 := closed.NodeKey1.SerializeCompressed()[0:16]
+				node1Bucket := binary.BigEndian.Uint64(node1Alias16) % bucketCount
+
+				node2Alias16 := closed.NodeKey2.SerializeCompressed()[0:16]
+				node2Bucket := binary.BigEndian.Uint64(node2Alias16) % bucketCount
+
 				required := eventLog.Info().
 					Str("eventType", "ChannelClosed").
 					Uint64("channelId", closed.ChannelID).
+					Uint32("blockHeight", blockHeight).
 					Str("node1Key", hex.EncodeToString(closed.NodeKey1.SerializeCompressed())).
 					Str("node2Key", hex.EncodeToString(closed.NodeKey2.SerializeCompressed())).
+					Str(fmt.Sprintf("linkNode%d", node1Bucket), hex.EncodeToString(node1Alias16)).
+					Str(fmt.Sprintf("linkNode%d", node2Bucket), hex.EncodeToString(node2Alias16)).
 					Str("chainHash", closed.ChainHash.String()).
 					Str("channelPoint", closed.ChannelPoint.String()).
 					Float64("capacity", closed.Capacity.ToUnit(btcutil.AmountMilliBTC))
@@ -669,29 +691,39 @@ func (r *ChannelRouter) networkHandler() {
 				Int("transactionCount", len(chainUpdate.Transactions)).
 				Msg("New block stats")
 
-			for index, trans := range chainUpdate.Transactions {
+			for _, trans := range chainUpdate.Transactions {
 				required := eventLog.Info().
 					Str("eventType", "NewUTXO").
-					Uint32(fmt.Sprintf("tran%dlockTime", index), trans.LockTime).
-					Int32(fmt.Sprintf("tran%dversion", index), trans.Version).
-					Int(fmt.Sprintf("tran%dtxInCount", index), len(trans.TxIn)).
-					Int(fmt.Sprintf("tran%dtxOutCount", index), len(trans.TxOut)).
-					Str(fmt.Sprintf("tran%dwitness", index), trans.WitnessHash().String())
+					Uint32("blockHeight", blockHeight).
+					Uint32("tranLockTime", trans.LockTime).
+					Int32("tranVersion", trans.Version).
+					Int("tranTxInCount", len(trans.TxIn)).
+					Int("tranTxOutCount", len(trans.TxOut)).
+					Str("tranWitness", trans.WitnessHash().String())
 
-				for indx, in := range trans.TxIn {
+				for x := 0; x<21 ; x++ {
+
+				}
+				for index, in := range trans.TxIn {
 					// TODO need prev values
+					// TODO rename tranTxIn%dSize tranTxIn%dScriptSize
 					required.
-						Uint32(fmt.Sprintf("tran%dtxIn%dSeq", index, indx), in.Sequence).
-						Int(fmt.Sprintf("tran%dtxIn%dSize", index, indx), in.SerializeSize()).
-						Str(fmt.Sprintf("tran%dtxIn%dOutPoint", index, indx), in.PreviousOutPoint.String())
-				}
-				for indx, out := range trans.TxOut {
-					required.
-						Int64(fmt.Sprintf("tran%dtxOut%dValue", index, indx), out.Value).
-						Int(fmt.Sprintf("tran%dtxOut%dSize", index, indx), out.SerializeSize())
+						Uint32(fmt.Sprintf("tranTxIn%dSeq", index), in.Sequence).
+						Int(fmt.Sprintf("tranTxIn%dScriptSize", index), in.SerializeSize()).
+						Str(fmt.Sprintf("tranTxIn%dOutPointHash", index), in.PreviousOutPoint.Hash.String()).
+						Uint32(fmt.Sprintf("tranTxIn%dOutPointIndex", index), in.PreviousOutPoint.Index)
 				}
 
-				required.Msg("New subscribed UTXO found")
+				outValue := int64(0)
+				for index, out := range trans.TxOut {
+					required.
+						Int64(fmt.Sprintf("tranTxOut%dValue", index), out.Value).
+						Int(fmt.Sprintf("tranTxOut%dScriptSize", index), out.SerializeSize())
+					outValue += out.Value
+				}
+
+				required.Int64("tranTxOutValue", outValue).
+					Msg("New subscribed UTXO found")
 			}
 
 			// Invalidate the route cache as the block height has
@@ -870,13 +902,19 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 				"graph: %v", msg.PubKey.SerializeCompressed(), err)
 		}
 
+		// TODO dig up node info for linking
 		log.Infof("Updated vertex data for node=%x",
 			msg.PubKey.SerializeCompressed())
+
+		bucketCount :=uint64(20)
+		nodeAlias16 := msg.PubKey.SerializeCompressed()[0:16]
+		nodeBucket := binary.BigEndian.Uint64(nodeAlias16) % bucketCount
 
 		required := eventLog.Info().
 			Str("eventType", "NodeUpdate").
 			Str("node", hex.EncodeToString(msg.PubKey.SerializeCompressed())).
 			Int("nodeAddressCount", len(msg.Addresses)).
+			Str(fmt.Sprintf("linkNode%d", nodeBucket), hex.EncodeToString(nodeAlias16)).
 			Str("nodeAlias", msg.Alias).
 			Str("lastUpdate", msg.LastUpdate.Format(time.RFC3339))
 
@@ -993,10 +1031,21 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 			msg.NodeKey2.SerializeCompressed(),
 			fundingPoint, msg.ChannelID, msg.Capacity)
 
+		// TODO inefficient?
+		bucketCount := uint64(20)
+		node1Alias16 := msg.NodeKey1.SerializeCompressed()[0:16]
+		node1Bucket := binary.BigEndian.Uint64(node1Alias16) % bucketCount
+
+		node2Alias16 := msg.NodeKey2.SerializeCompressed()[0:16]
+		node2Bucket := binary.BigEndian.Uint64(node2Alias16) % bucketCount
+
 		eventLog.Info().
 			Str("eventType", "NewChannel").
+			Uint32("blockHeight", channelID.BlockHeight).
 			Str("node1Key", hex.EncodeToString(msg.NodeKey1.SerializeCompressed())).
 			Str("node2Key", hex.EncodeToString(msg.NodeKey2.SerializeCompressed())).
+			Str(fmt.Sprintf("linkNode%d", node1Bucket), hex.EncodeToString(node1Alias16)).
+			Str(fmt.Sprintf("linkNode%d", node2Bucket), hex.EncodeToString(node2Alias16)).
 			Str("fundingPoint", fundingPoint.String()).
 			Uint64("channelId", msg.ChannelID).
 			Float64("capacity", msg.Capacity.ToUnit(btcutil.AmountMilliBTC)).
@@ -1096,7 +1145,12 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 			Str("signature", hex.EncodeToString(msg.Signature.Serialize()))
 
 		if msg.Node != nil {
-			required = required.Str("nodePubKey", hex.EncodeToString(msg.Node.PubKey.SerializeCompressed()))
+			bucketCount := uint64(20)
+			nodeAlias16 := msg.Node.PubKey.SerializeCompressed()[0:16]
+			nodeBucket := binary.BigEndian.Uint64(nodeAlias16) % bucketCount
+			required = required.
+				Str(fmt.Sprintf("linkNode%d", nodeBucket), hex.EncodeToString(nodeAlias16)).
+				Str("nodePubKey", hex.EncodeToString(msg.Node.PubKey.SerializeCompressed()))
 		}
 		required.Msg("Channel update")
 
