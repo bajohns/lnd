@@ -570,7 +570,20 @@ func (s *server) peerBootstrapper(numTargetPeers uint32,
 				return
 			}
 
-			s.OutboundPeerConnected(nil, conn)
+			connReq := &connmgr.ConnReq{
+				Addr:      a,
+				Permanent: true,
+			}
+
+			pubStr := string(conn.RemotePub().SerializeCompressed())
+
+			s.persistentPeers[pubStr] = struct{}{}
+			s.persistentConnReqs[pubStr] = append(
+				s.persistentConnReqs[pubStr], connReq)
+
+			srvrLog.Infof("Creating perm peer for %v", a)
+
+			s.OutboundPeerConnected(connReq, conn)
 		}(addr)
 	}
 
@@ -673,7 +686,21 @@ func (s *server) peerBootstrapper(numTargetPeers uint32,
 						atomic.AddUint32(&epochErrors, 1)
 						return
 					}
-					s.OutboundPeerConnected(nil, conn)
+
+					connReq := &connmgr.ConnReq{
+						Addr:      a,
+						Permanent: true,
+					}
+
+					pubStr := string(conn.RemotePub().SerializeCompressed())
+
+					s.persistentPeers[pubStr] = struct{}{}
+					s.persistentConnReqs[pubStr] = append(
+						s.persistentConnReqs[pubStr], connReq)
+
+					srvrLog.Infof("Creating perm peer for %v", a)
+
+					s.OutboundPeerConnected(connReq, conn)
 				}(addr)
 			}
 		case <-s.quit:
