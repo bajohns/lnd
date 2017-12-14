@@ -533,6 +533,24 @@ func initNetworkBootstrappers(s *server) ([]discovery.NetworkPeerBootstrapper, e
 	return bootStrappers, nil
 }
 
+func (s *server) addPersistentPeer(addr *lnwire.NetAddress, pubStr string) (*connmgr.ConnReq) {
+	// Send the persistent connection request to the
+	// connection manager, saving the request itself so we
+	// can cancel/restart the process as needed.
+	connReq := &connmgr.ConnReq{
+		Addr:      addr,
+		Permanent: true,
+	}
+
+	srvrLog.Debugf("Attempting persistent connection to "+
+		"channel peer %v", addr)
+
+	s.persistentPeers[pubStr] = struct{}{}
+	s.persistentConnReqs[pubStr] = append(
+		s.persistentConnReqs[pubStr], connReq)
+
+	return connReq
+}
 // peerBootstrapper is a goroutine which is tasked with attempting to establish
 // and maintain a target min number of outbound connections. With this
 // invariant, we ensure that our node is connected to a diverse set of peers
@@ -570,20 +588,10 @@ func (s *server) peerBootstrapper(numTargetPeers uint32,
 				return
 			}
 
-			connReq := &connmgr.ConnReq{
-				Addr:      a,
-				Permanent: true,
-			}
-
-			pubStr := string(conn.RemotePub().SerializeCompressed())
-
-			s.persistentPeers[pubStr] = struct{}{}
-			s.persistentConnReqs[pubStr] = append(
-				s.persistentConnReqs[pubStr], connReq)
-
-			srvrLog.Infof("Creating perm peer for %v", a)
-
-			s.OutboundPeerConnected(connReq, conn)
+			s.mu.Lock()
+			s.addPersistentPeer(addr, string(conn.RemotePub().SerializeCompressed()))
+			s.mu.Unlock()
+			s.OutboundPeerConnected(nil, conn)
 		}(addr)
 	}
 
@@ -687,20 +695,10 @@ func (s *server) peerBootstrapper(numTargetPeers uint32,
 						return
 					}
 
-					connReq := &connmgr.ConnReq{
-						Addr:      a,
-						Permanent: true,
-					}
-
-					pubStr := string(conn.RemotePub().SerializeCompressed())
-
-					s.persistentPeers[pubStr] = struct{}{}
-					s.persistentConnReqs[pubStr] = append(
-						s.persistentConnReqs[pubStr], connReq)
-
-					srvrLog.Infof("Creating perm peer for %v", a)
-
-					s.OutboundPeerConnected(connReq, conn)
+					s.mu.Lock()
+					s.addPersistentPeer(a, string(conn.RemotePub().SerializeCompressed()))
+					s.mu.Unlock()
+					s.OutboundPeerConnected(nil, conn)
 				}(addr)
 			}
 		case <-s.quit:
@@ -847,20 +845,7 @@ func (s *server) establishPersistentConnections() error {
 				IdentityKey: nodeAddr.pubKey,
 				Address:     address,
 			}
-			srvrLog.Debugf("Attempting persistent connection to "+
-				"channel peer %v", lnAddr)
-
-			// Send the persistent connection request to the
-			// connection manager, saving the request itself so we
-			// can cancel/restart the process as needed.
-			connReq := &connmgr.ConnReq{
-				Addr:      lnAddr,
-				Permanent: true,
-			}
-
-			s.persistentConnReqs[pubStr] = append(
-				s.persistentConnReqs[pubStr], connReq)
-
+			connReq:= s.addPersistentPeer(lnAddr, pubStr)
 			go s.connMgr.Connect(connReq)
 		}
 	}
@@ -1524,14 +1509,7 @@ func (s *server) ConnectToPeer(addr *lnwire.NetAddress, perm bool) error {
 	// persistent connection to the peer.
 	srvrLog.Debugf("Connecting to %v", addr)
 	if perm {
-		connReq := &connmgr.ConnReq{
-			Addr:      addr,
-			Permanent: true,
-		}
-
-		s.persistentPeers[targetPub] = struct{}{}
-		s.persistentConnReqs[targetPub] = append(
-			s.persistentConnReqs[targetPub], connReq)
+		connReq := s.addPersistentPeer(addr, targetPub)
 		s.mu.Unlock()
 
 		go s.connMgr.Connect(connReq)
