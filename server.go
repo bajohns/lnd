@@ -569,6 +569,11 @@ func (s *server) peerBootstrapper(numTargetPeers uint32,
 				return
 			}
 
+			targetPub := string(conn.RemotePub().SerializeCompressed())
+			s.mu.Lock()
+			s.persistentPeers[targetPub] = struct{}{}
+			s.mu.Unlock()
+
 			s.OutboundPeerConnected(nil, conn)
 		}(addr)
 	}
@@ -672,6 +677,11 @@ func (s *server) peerBootstrapper(numTargetPeers uint32,
 						atomic.AddUint32(&epochErrors, 1)
 						return
 					}
+
+					targetPub := string(conn.RemotePub().SerializeCompressed())
+					s.mu.Lock()
+					s.persistentPeers[targetPub] = struct{}{}
+					s.mu.Unlock()
 					s.OutboundPeerConnected(nil, conn)
 				}(addr)
 			}
