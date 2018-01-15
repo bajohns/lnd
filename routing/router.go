@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"os"
 	"bytes"
 	"fmt"
 	"runtime"
@@ -8,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"encoding/binary"
 
 	"github.com/boltdb/bolt"
 	"github.com/davecgh/go-spew/spew"
@@ -21,9 +23,12 @@ import (
 	"github.com/roasbeef/btcutil"
 
 	"crypto/sha256"
+	"encoding/hex"
 
 	"github.com/go-errors/errors"
 	"github.com/lightningnetwork/lightning-onion"
+	"github.com/rs/zerolog"
+	"strings"
 )
 
 const (
@@ -141,6 +146,8 @@ type Config struct {
 	// GraphPruneInterval is used as an interval to determine how often we
 	// should examine the channel graph to garbage collect zombie channels.
 	GraphPruneInterval time.Duration
+
+	LogDir string
 }
 
 // routeTuple is an entry within the ChannelRouter's route cache. We cache
@@ -349,6 +356,11 @@ func New(cfg Config) (*ChannelRouter, error) {
 		return nil, err
 	}
 
+	eventJson := createEventLog(cfg.LogDir)
+	eventJson.Error().Msg("lnd startup")
+
+	UseJsonLogger(eventJson)
+
 	return &ChannelRouter{
 		cfg:               &cfg,
 		networkUpdates:    make(chan *routingMsg),
@@ -360,6 +372,17 @@ func New(cfg Config) (*ChannelRouter, error) {
 		routeCache:        make(map[routeTuple][]*Route),
 		quit:              make(chan struct{}),
 	}, nil
+}
+
+func createEventLog(logDir string) zerolog.Logger {
+	zerolog.SetGlobalLevel(zerolog.InfoLevel)
+
+	f, err := os.OpenFile(logDir+"/events.json", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		println("error opening file: %v", err)
+	}
+
+	return zerolog.New(f).With().Timestamp().Str("src", "lnd").Logger()
 }
 
 // Start launches all the goroutines the ChannelRouter requires to carry out
@@ -586,6 +609,36 @@ func (r *ChannelRouter) syncGraphWithChain() error {
 		log.Infof("Block %v (height=%v) closed %v channels",
 			nextHash, nextHeight, numClosed)
 
+		for _, closed := range closedChans {
+
+			bucketCount := uint64(20)
+			node1Alias16 := closed.NodeKey1.SerializeCompressed()[0:16]
+			node1Bucket := binary.BigEndian.Uint64(node1Alias16) % bucketCount
+
+			node2Alias16 := closed.NodeKey2.SerializeCompressed()[0:16]
+			node2Bucket := binary.BigEndian.Uint64(node2Alias16) % bucketCount
+
+			required := eventLog.Info().
+				Str("eventType", "ChannelClosed").
+				Uint64("channelId", closed.ChannelID).
+				Uint32("blockHeight", nextHeight).
+				Str("node1Key", hex.EncodeToString(closed.NodeKey1.SerializeCompressed())).
+				Str("node2Key", hex.EncodeToString(closed.NodeKey2.SerializeCompressed())).
+				Str(fmt.Sprintf("linkNode%d", node1Bucket), hex.EncodeToString(node1Alias16)).
+				Str(fmt.Sprintf("linkNode%d", node2Bucket), hex.EncodeToString(node2Alias16)).
+				Str("chainHash", closed.ChainHash.String()).
+				Str("channelPoint", closed.ChannelPoint.String()).
+				Float64("capacity", closed.Capacity.ToUnit(btcutil.AmountMilliBTC))
+
+			if ! closed.AuthProof.IsEmpty() {
+				required = required.
+					Str("node1AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig1.Serialize())).
+					Str("node1AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig1.Serialize())).
+					Str("node2AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig2.Serialize())).
+					Str("node2AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig2.Serialize()))
+			}
+			required.Msg("Channel closed")
+		}
 		numChansClosed += numClosed
 	}
 
@@ -747,6 +800,79 @@ func (r *ChannelRouter) networkHandler() {
 
 			log.Infof("Block %v (height=%v) closed %v channels",
 				chainUpdate.Hash, blockHeight, len(chansClosed))
+
+			for _, closed := range chansClosed {
+				bucketCount := uint64(20)
+				node1Alias16 := closed.NodeKey1.SerializeCompressed()[0:16]
+				node1Bucket := binary.BigEndian.Uint64(node1Alias16) % bucketCount
+
+				node2Alias16 := closed.NodeKey2.SerializeCompressed()[0:16]
+				node2Bucket := binary.BigEndian.Uint64(node2Alias16) % bucketCount
+
+				required := eventLog.Info().
+					Str("eventType", "ChannelClosed").
+					Uint64("channelId", closed.ChannelID).
+					Uint32("blockHeight", blockHeight).
+					Str("node1Key", hex.EncodeToString(closed.NodeKey1.SerializeCompressed())).
+					Str("node2Key", hex.EncodeToString(closed.NodeKey2.SerializeCompressed())).
+					Str(fmt.Sprintf("linkNode%d", node1Bucket), hex.EncodeToString(node1Alias16)).
+					Str(fmt.Sprintf("linkNode%d", node2Bucket), hex.EncodeToString(node2Alias16)).
+					Str("chainHash", closed.ChainHash.String()).
+					Str("channelPoint", closed.ChannelPoint.String()).
+					Float64("capacity", closed.Capacity.ToUnit(btcutil.AmountMilliBTC))
+
+				if ! closed.AuthProof.IsEmpty() {
+					required = required.
+						Str("node1AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig1.Serialize())).
+						Str("node1AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig1.Serialize())).
+						Str("node2AuthProofSig", hex.EncodeToString(closed.AuthProof.NodeSig2.Serialize())).
+						Str("node2AuthProofBitcoinSig", hex.EncodeToString(closed.AuthProof.BitcoinSig2.Serialize()))
+				}
+				required.Msg("Channel closed")
+			}
+
+
+			eventLog.Info().Str("blockHash", chainUpdate.Hash.String()).
+				Str("eventType", "NewBlock").
+				Uint32("blockHeight", blockHeight).
+				Int("channelsClosed", len(chansClosed)).
+				Int("transactionCount", len(chainUpdate.Transactions)).
+				Msg("New block stats")
+
+			for _, trans := range chainUpdate.Transactions {
+				required := eventLog.Info().
+					Str("eventType", "NewUTXO").
+					Uint32("blockHeight", blockHeight).
+					Uint32("tranLockTime", trans.LockTime).
+					Int32("tranVersion", trans.Version).
+					Int("tranTxInCount", len(trans.TxIn)).
+					Int("tranTxOutCount", len(trans.TxOut)).
+					Str("tranWitness", trans.WitnessHash().String())
+
+				for x := 0; x<21 ; x++ {
+
+				}
+				for index, in := range trans.TxIn {
+					// TODO need prev values
+					// TODO rename tranTxIn%dSize tranTxIn%dScriptSize
+					required.
+						Uint32(fmt.Sprintf("tranTxIn%dSeq", index), in.Sequence).
+						Int(fmt.Sprintf("tranTxIn%dScriptSize", index), in.SerializeSize()).
+						Str(fmt.Sprintf("tranTxIn%dOutPointHash", index), in.PreviousOutPoint.Hash.String()).
+						Uint32(fmt.Sprintf("tranTxIn%dOutPointIndex", index), in.PreviousOutPoint.Index)
+				}
+
+				outValue := int64(0)
+				for index, out := range trans.TxOut {
+					required.
+						Int64(fmt.Sprintf("tranTxOut%dValue", index), out.Value).
+						Int(fmt.Sprintf("tranTxOut%dScriptSize", index), out.SerializeSize())
+					outValue += out.Value
+				}
+
+				required.Int64("tranTxOutValue", outValue).
+					Msg("New subscribed UTXO found")
+			}
 
 			// Invalidate the route cache as the block height has
 			// changed which will invalidate the HTLC timeouts we
@@ -931,8 +1057,32 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 				"graph: %v", msg.PubKey.SerializeCompressed(), err)
 		}
 
+		// TODO dig up node info for linking
 		log.Infof("Updated vertex data for node=%x",
 			msg.PubKey.SerializeCompressed())
+
+		bucketCount :=uint64(20)
+		nodeAlias16 := msg.PubKey.SerializeCompressed()[0:16]
+		nodeBucket := binary.BigEndian.Uint64(nodeAlias16) % bucketCount
+
+		required := eventLog.Info().
+			Str("eventType", "NodeUpdate").
+			Str("node", hex.EncodeToString(msg.PubKey.SerializeCompressed())).
+			Int("nodeAddressCount", len(msg.Addresses)).
+			Str(fmt.Sprintf("linkNode%d", nodeBucket), hex.EncodeToString(nodeAlias16)).
+			Str("nodeAlias", msg.Alias).
+			Str("lastUpdate", msg.LastUpdate.Format(time.RFC3339))
+
+		for index, addr := range msg.Addresses {
+			split:=strings.Split(addr.String(), ":")
+			addr := split[0]
+			port := split[1]
+			required.
+				Str(fmt.Sprintf("nodeAddress%dIp", index), addr).
+				Str(fmt.Sprintf("nodeAddress%dPort", index), port)
+		}
+
+		required.Msg("Node update")
 
 	case *channeldb.ChannelEdgeInfo:
 		// Prior to processing the announcement we first check if we
@@ -1036,6 +1186,26 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 			msg.NodeKey2.SerializeCompressed(),
 			fundingPoint, msg.ChannelID, msg.Capacity)
 
+		// TODO inefficient?
+		bucketCount := uint64(20)
+		node1Alias16 := msg.NodeKey1.SerializeCompressed()[0:16]
+		node1Bucket := binary.BigEndian.Uint64(node1Alias16) % bucketCount
+
+		node2Alias16 := msg.NodeKey2.SerializeCompressed()[0:16]
+		node2Bucket := binary.BigEndian.Uint64(node2Alias16) % bucketCount
+
+		eventLog.Info().
+			Str("eventType", "NewChannel").
+			Uint32("blockHeight", channelID.BlockHeight).
+			Str("node1Key", hex.EncodeToString(msg.NodeKey1.SerializeCompressed())).
+			Str("node2Key", hex.EncodeToString(msg.NodeKey2.SerializeCompressed())).
+			Str(fmt.Sprintf("linkNode%d", node1Bucket), hex.EncodeToString(node1Alias16)).
+			Str(fmt.Sprintf("linkNode%d", node2Bucket), hex.EncodeToString(node2Alias16)).
+			Str("fundingPoint", fundingPoint.String()).
+			Uint64("channelId", msg.ChannelID).
+			Float64("capacity", msg.Capacity.ToUnit(btcutil.AmountMilliBTC)).
+			Msg("New channel discovered")
+
 		// As a new edge has been added to the channel graph, we'll
 		// update the current UTXO filter within our active
 		// FilteredChainView so we are notified if/when this channel is
@@ -1127,6 +1297,27 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 		invalidateCache = true
 		log.Infof("New channel update applied: %v",
 			spew.Sdump(msg))
+
+		required := eventLog.Info().
+			Str("eventType", "ChannelUpdate").
+			Uint64("channelId", msg.ChannelID).
+			Uint16("flags", uint16(msg.Flags)).
+			Str("lastUpdate", msg.LastUpdate.Format(time.RFC3339)).
+			Float64("feeBaseMSat", msg.FeeBaseMSat.ToSatoshis().ToUnit(btcutil.AmountMilliBTC)).
+			Uint16("timeLockDelta", msg.TimeLockDelta).
+			Float64("minHTLC", msg.MinHTLC.ToSatoshis().ToUnit(btcutil.AmountMilliBTC)).
+			Str("signature", hex.EncodeToString(msg.Signature.Serialize()))
+
+		if msg.Node != nil {
+			bucketCount := uint64(20)
+			nodeAlias16 := msg.Node.PubKey.SerializeCompressed()[0:16]
+			nodeBucket := binary.BigEndian.Uint64(nodeAlias16) % bucketCount
+			required = required.
+				Str(fmt.Sprintf("linkNode%d", nodeBucket), hex.EncodeToString(nodeAlias16)).
+				Str("nodePubKey", hex.EncodeToString(msg.Node.PubKey.SerializeCompressed()))
+		}
+		required.Msg("Channel update")
+
 
 	default:
 		return errors.Errorf("wrong routing update message type")
@@ -1662,7 +1853,7 @@ func (r *ChannelRouter) SendPayment(payment *LightningPayment) ([32]byte, *Route
 				// As this error indicates that the target
 				// channel was unable to carry this HTLC (for
 				// w/e reason), we'll query the index to find
-				// the _outgoign_ channel the source of the
+				// the _outgoing_ channel the source of the
 				// error was meant to pass the HTLC along to.
 				badChan, ok := route.nextHopChannel(errSource)
 				if !ok {

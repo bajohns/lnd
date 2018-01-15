@@ -509,7 +509,7 @@ func (c *ChannelGraph) HasChannelEdge(chanID uint64) (time.Time, time.Time, bool
 
 		// If the channel has been found in the graph, then retrieve
 		// the edges itself so we can return the last updated
-		// timestmaps.
+		// timestamps.
 		nodes := tx.Bucket(nodeBucket)
 		if nodes == nil {
 			return ErrGraphNodeNotFound

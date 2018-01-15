@@ -78,3 +78,5 @@ import:
 - package: github.com/rogpeppe/fastuuid
 - package: gopkg.in/errgo.v1
 - package: github.com/miekg/dns
+- package: github.com/rs/zerolog/log
+  version: 9a65e7ccd2bad9082586a4de21f914648416c90f
