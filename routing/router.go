@@ -1301,7 +1301,7 @@ func (r *ChannelRouter) processUpdate(msg interface{}) error {
 		required := eventLog.Info().
 			Str("eventType", "ChannelUpdate").
 			Uint64("channelId", msg.ChannelID).
-			Uint16("flags", msg.Flags).
+			Uint16("flags", uint16(msg.Flags)).
 			Str("lastUpdate", msg.LastUpdate.Format(time.RFC3339)).
 			Float64("feeBaseMSat", msg.FeeBaseMSat.ToSatoshis().ToUnit(btcutil.AmountMilliBTC)).
 			Uint16("timeLockDelta", msg.TimeLockDelta).
