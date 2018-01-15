@@ -84,6 +84,7 @@ type chainConfig struct {
 	RPCCert    string `long:"rpccert" description:"File containing the daemon's certificate file"`
 	RawRPCCert string `long:"rawrpccert" description:"The raw bytes of the daemon's PEM-encoded certificate chain which will be used to authenticate the RPC connection."`
 
+	MainNet  bool `long:"mainnet" description:"Use the main network"`
 	TestNet3 bool `long:"testnet" description:"Use the test network"`
 	SimNet   bool `long:"simnet" description:"Use the simulation test network"`
 	RegTest  bool `long:"regtest" description:"Use the regression test network"`
@@ -316,6 +317,10 @@ func loadConfig() (*config, error) {
 		// number of network flags passed; assign active network params
 		// while we're at it.
 		numNets := 0
+		if cfg.Bitcoin.MainNet {
+			numNets++
+			activeNetParams = bitcoinMainNetParams
+		}
 		if cfg.Bitcoin.TestNet3 {
 			numNets++
 			activeNetParams = bitcoinTestNetParams
