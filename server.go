@@ -314,6 +314,7 @@ func newServer(listenAddrs []string, chanDB *channeldb.DB, cc *chainControl,
 		},
 		ChannelPruneExpiry: time.Duration(time.Hour * 24 * 14),
 		GraphPruneInterval: time.Duration(time.Hour),
+		LogDir: cfg.LogDir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("can't create router: %v", err)
